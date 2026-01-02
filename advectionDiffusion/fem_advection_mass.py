@@ -1,4 +1,3 @@
-#python -i fem_advection_imp.py -lin_sys_ksp_monitor -lin_sys_pc_type gamg -lin_sys_ksp_atol 1e-8 -lin_sys_ksp_rtol 1e-18 -lin_sys_ksp_max_it 3 -mass_inv_ksp_type preonly -mass_inv_pc_type qr -normal_eq_ksp_rtol 1e-32 -normal_eq_ksp_atol 1e-8 -normal_eq_ksp_monitor -normal_eq_ksp_type fcg -normal_eq_pc_type gamg -nu 1.25e-3 -n 256 -normal_eq_ksp_max_it 500 
 from firedrake import *
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,6 +10,12 @@ OptDB = PETSc.Options()
 n = OptDB.getInt('n', 128)
 nu = OptDB.getReal('nu', 1e-2)
 refs = OptDB.getInt('ref', 2)
+spectral_equiv = OptDB.getBool('spec_equiv', False)
+wind_type = OptDB.getInt('wind', 1)
+
+
+print("N: {}, nu: {}: ref: {} -- real N: {}".format(n,nu,refs, (2**refs)*n))
+print("Wind type: {}".format(wind_type))
 
 
 mesh = UnitSquareMesh(n, n)
@@ -23,12 +28,23 @@ delta = Constant(1e-4)
 
 res = []
 # Define the advection velocity and viscosity
-w = Constant((1.0, 1.0))
-w = 1/(inner(w,w))*w
-#w = as_vector([2*y*(1-x**2), -2*x*(1-y**2)])
-wperp = Constant((0.0, 1.0))
-uperps = [interpolate(-x-y, V),
-          interpolate(Constant(1), V)]
+if wind_type == 1:
+    w = Constant((1.0, 0.0))
+    w = 1/(inner(w,w))*w
+    wperp = Constant((0.0, 1.0))
+    wperp = 1/(inner(wperp,wperp))*wperp
+elif wind_type == 2:
+    w = Constant((1.0, 1.0))
+    w = 1/(inner(w,w))*w
+    wperp = Constant((-1.0, 1.0))
+    wperp = 1/(inner(wperp,wperp))*wperp
+elif wind_type == 3:
+    w = as_vector((x, -y))
+    w = 1/(inner(w,w))*w
+    wperp = as_vector((y, x))
+    wperp = 1/(inner(wperp,wperp))*wperp
+else:
+    raise RuntimeError("Wind not defined...")
 nu = Constant(nu)
 
 #Define the bilinear form
@@ -148,21 +164,6 @@ if OptDB.getString('normal_eq_ksp_type', 'unspec') in ['fcg', 'cg']:
         res = res + [r.norm()]
         print("\t||Ax - b|| = {}" .format(r.norm()))
 
-    petscNullspace = []
-    for uperp in uperps:
-        with uperp.dat.vec as vperp:
-            vperp_petsc = vperp.copy()
-            petscNullspace = petscNullspace + [vperp_petsc]
-    for i, vec in enumerate(petscNullspace):
-            alphas = []
-            for vec_ in petscNullspace[:i]:
-                alphas.append(vec.dot(vec_))
-            for alpha, vec_ in zip(alphas, petscNullspace[:i]):
-                vec.axpy(-alpha, vec_)
-            vec.normalize()
-    nullspace = PETSc.NullSpace().create(constant=False, vectors=petscNullspace)
-    #P_petsc.setNearNullSpace(nullspace)
-    #ATMinvA.setNearNullSpace(nullspace)
     ksp = PETSc.KSP()
     ksp.create(comm=mesh.comm)
     #Solve the normal equations
@@ -234,6 +235,14 @@ else:
 
 with un.dat.vec as v:
     v.copy(w_petsc)
+
+from eps_utils import *
+if spectral_equiv:
+    print("SPECTRAL EQUIVALENCE")
+    A, P = ksp.getOperators()
+    lam_min, lam_max, kappa = spectral_equivalence_bounds(A, P, tol=1e-8, max_it=2000)
+    est_it = 0.5*np.sqrt(kappa)*np.log(1e6)
+    print(lam_min, lam_max, kappa, est_it)
 
 #Output the solution
 divbu = Function(W)
